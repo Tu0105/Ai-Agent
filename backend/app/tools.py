@@ -4,11 +4,73 @@
 使用LangChain的@tool装饰器定义工具
 """
 
+import ast
+import math
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from langchain_core.tools import tool
 import json
 import random
+
+
+MAX_EXPRESSION_LENGTH = 200
+MAX_EXPRESSION_NODES = 64
+MAX_ABSOLUTE_VALUE = 10**100
+
+
+class UnsafeExpressionError(ValueError):
+    """Raised when an expression is outside the calculator's small grammar."""
+
+
+def safe_calculate(expression: str) -> Union[int, float]:
+    """Evaluate a deliberately small arithmetic grammar without executing Python code."""
+    if not isinstance(expression, str) or not expression.strip():
+        raise UnsafeExpressionError("Expression must not be empty.")
+    if len(expression) > MAX_EXPRESSION_LENGTH:
+        raise UnsafeExpressionError("Expression is too long.")
+
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        raise UnsafeExpressionError("Expression syntax is invalid.") from exc
+
+    nodes_seen = 0
+
+    def is_supported_number(value: Union[int, float]) -> bool:
+        return abs(value) <= MAX_ABSOLUTE_VALUE and (isinstance(value, int) or math.isfinite(value))
+
+    def evaluate(node: ast.AST) -> Union[int, float]:
+        nonlocal nodes_seen
+        nodes_seen += 1
+        if nodes_seen > MAX_EXPRESSION_NODES:
+            raise UnsafeExpressionError("Expression is too complex.")
+
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            if not is_supported_number(node.value):
+                raise UnsafeExpressionError("Number is outside the supported range.")
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = evaluate(node.operand)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+            left = evaluate(node.left)
+            right = evaluate(node.right)
+            if isinstance(node.op, ast.Add):
+                result = left + right
+            elif isinstance(node.op, ast.Sub):
+                result = left - right
+            elif isinstance(node.op, ast.Mult):
+                result = left * right
+            else:
+                result = left / right
+            if not is_supported_number(result):
+                raise UnsafeExpressionError("Result is outside the supported range.")
+            return result
+        raise UnsafeExpressionError("Only +, -, *, /, parentheses, and numeric literals are supported.")
+
+    return evaluate(tree)
 
 
 # ============================================
@@ -159,7 +221,7 @@ def calculate(expression: str) -> str:
             return "⚠️ 表达式包含非法字符，仅支持数字和基本运算符"
         
         # 使用eval进行计算（实际项目中应使用更安全的eval替代方案）
-        result = eval(expression)
+        result = safe_calculate(expression)
         
         # 格式化结果
         if isinstance(result, float):

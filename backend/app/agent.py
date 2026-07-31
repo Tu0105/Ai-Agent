@@ -3,7 +3,11 @@ Agent核心逻辑模块
 创建和管理LangChain Agent，处理用户请求
 """
 
+import os
+import time
 import uuid
+from collections import OrderedDict
+from threading import RLock
 from typing import AsyncGenerator, Optional, Dict, Any, Callable
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.runnables import RunnableConfig
@@ -235,8 +239,31 @@ class CustomerServiceAgent:
         return self.memory_manager.clear_memory(self.conversation_id)
 
 
+def _bounded_positive_int(name: str, default: int) -> int:
+    """Read a positive cache limit without preventing service startup on bad config."""
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
 # Agent工厂函数
-_agent_cache: Dict[str, CustomerServiceAgent] = {}
+_AGENT_CACHE_MAX_SIZE = _bounded_positive_int("AGENT_CACHE_MAX_SIZE", 100)
+_AGENT_CACHE_TTL_SECONDS = _bounded_positive_int("AGENT_CACHE_TTL_SECONDS", 1800)
+_agent_cache: OrderedDict[str, tuple[CustomerServiceAgent, float]] = OrderedDict()
+_agent_cache_lock = RLock()
+
+
+def _evict_expired_agents(now: Optional[float] = None) -> None:
+    """Remove expired entries before the cache is read or written."""
+    current_time = now if now is not None else time.monotonic()
+    expired = [
+        conversation_id
+        for conversation_id, (_, last_used) in _agent_cache.items()
+        if current_time - last_used >= _AGENT_CACHE_TTL_SECONDS
+    ]
+    for conversation_id in expired:
+        _agent_cache.pop(conversation_id, None)
 
 
 def get_or_create_agent(conversation_id: Optional[str] = None) -> CustomerServiceAgent:
@@ -252,12 +279,27 @@ def get_or_create_agent(conversation_id: Optional[str] = None) -> CustomerServic
     if conversation_id is None:
         conversation_id = str(uuid.uuid4())
     
-    if conversation_id not in _agent_cache:
-        _agent_cache[conversation_id] = CustomerServiceAgent(
-            conversation_id=conversation_id
-        )
-    
-    return _agent_cache[conversation_id]
+    with _agent_cache_lock:
+        now = time.monotonic()
+        _evict_expired_agents(now)
+        cached = _agent_cache.get(conversation_id)
+        if cached is not None:
+            agent, _ = cached
+            _agent_cache.move_to_end(conversation_id)
+            _agent_cache[conversation_id] = (agent, now)
+            return agent
+
+        agent = CustomerServiceAgent(conversation_id=conversation_id)
+        _agent_cache[conversation_id] = (agent, now)
+        while len(_agent_cache) > _AGENT_CACHE_MAX_SIZE:
+            _agent_cache.popitem(last=False)
+        return agent
+
+
+def evict_agent(conversation_id: str) -> None:
+    """Remove a deleted conversation from the in-process agent cache."""
+    with _agent_cache_lock:
+        _agent_cache.pop(conversation_id, None)
 
 
 def invoke_agent(message: str, conversation_id: Optional[str] = None) -> Dict[str, Any]:

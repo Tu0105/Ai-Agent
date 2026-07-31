@@ -6,11 +6,24 @@
 import os
 import json
 import uuid
+from collections import OrderedDict
 from typing import List, Optional, Dict
 from datetime import datetime
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain.memory import ConversationBufferMemory
 from langchain_core.chat_history import InMemoryChatMessageHistory
+
+
+def _bounded_positive_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read a configured limit while retaining a safe default on invalid input."""
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+MAX_CACHED_CONVERSATIONS = _bounded_positive_int("MEMORY_CACHE_MAX_CONVERSATIONS", 100)
+MAX_MESSAGES_PER_CONVERSATION = _bounded_positive_int("MEMORY_MAX_MESSAGES", 100, minimum=2)
 
 
 class ConversationMemoryManager:
@@ -24,7 +37,7 @@ class ConversationMemoryManager:
             storage_dir: 记忆存储目录
         """
         self.storage_dir = storage_dir
-        self.memory_store: Dict[str, ConversationBufferMemory] = {}
+        self.memory_store: OrderedDict[str, ConversationBufferMemory] = OrderedDict()
         
         # 确保存储目录存在
         os.makedirs(storage_dir, exist_ok=True)
@@ -41,7 +54,8 @@ class ConversationMemoryManager:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    return data.get("messages", [])
+                    messages = data.get("messages", [])
+                    return messages[-MAX_MESSAGES_PER_CONVERSATION:] if isinstance(messages, list) else []
             except (json.JSONDecodeError, IOError):
                 return []
         return []
@@ -96,6 +110,10 @@ class ConversationMemoryManager:
                     memory.chat_memory.add_system_message(content)
             
             self.memory_store[conversation_id] = memory
+            while len(self.memory_store) > MAX_CACHED_CONVERSATIONS:
+                self.memory_store.popitem(last=False)
+        else:
+            self.memory_store.move_to_end(conversation_id)
         
         return conversation_id, self.memory_store[conversation_id]
     
@@ -167,6 +185,8 @@ class ConversationMemoryManager:
         """
         if conversation_id in self.memory_store:
             memory = self.memory_store[conversation_id]
+            if len(memory.chat_memory.messages) > MAX_MESSAGES_PER_CONVERSATION:
+                del memory.chat_memory.messages[:-MAX_MESSAGES_PER_CONVERSATION]
             messages = []
             
             for msg in memory.chat_memory.messages:

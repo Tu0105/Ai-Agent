@@ -3,9 +3,16 @@
 定义聊天请求、响应和消息的数据结构
 """
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Literal
 from datetime import datetime
+
+
+MAX_MESSAGE_LENGTH = 4_000
+MAX_CONVERSATION_ID_LENGTH = 128
+CONVERSATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class Message(BaseModel):
@@ -19,6 +26,25 @@ class ChatRequest(BaseModel):
     """聊天请求模型"""
     message: str = Field(..., description="用户消息", min_length=1)
     conversation_id: Optional[str] = Field(default=None, description="对话ID，用于追踪对话历史")
+
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Message must not be blank.")
+        if len(value) > MAX_MESSAGE_LENGTH:
+            raise ValueError("Message exceeds the maximum length.")
+        return value
+
+    @field_validator("conversation_id")
+    @classmethod
+    def validate_conversation_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if len(value) > MAX_CONVERSATION_ID_LENGTH or not CONVERSATION_ID_PATTERN.fullmatch(value):
+            raise ValueError("Conversation ID contains unsupported characters.")
+        return value
 
 
 class ChatResponse(BaseModel):
