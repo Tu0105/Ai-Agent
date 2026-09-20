@@ -9,9 +9,8 @@ import uuid
 from collections import OrderedDict
 from typing import List, Optional, Dict
 from datetime import datetime
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain.memory import ConversationBufferMemory
-from langchain_core.chat_history import InMemoryChatMessageHistory
 
 
 def _bounded_positive_int(name: str, default: int, minimum: int = 1) -> int:
